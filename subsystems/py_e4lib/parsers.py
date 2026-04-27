@@ -1,110 +1,75 @@
 # py_e4lib/parsers.py
 
 import struct
-from typing import List, Tuple, Optional
 from .constants import TEMP_CALIBRATION
 
 
-def parse_bvp(data: bytes) -> List[Tuple[int, int]]:
-    """Decode 7-bit packed delta encoding."""
+def parse_bvp(data: bytes):
+    """Decode 7-bit packed delta encoding from a BVP notification."""
     decoded = []
-    uVar28 = 0
+    carry = 0
 
-    for uVar37 in range(0x14):
-        bVar21 = data[uVar37]
-        iVar31 = uVar37 % 7
-        uVar36 = iVar31 + 1
+    for i in range(0x14):
+        byte = data[i]
+        mod = i % 7
+        shift = mod + 1
 
-        uVar28 = (bVar21 >> uVar36) | uVar28
+        val = ((byte >> shift) | carry) & 0x7F
+        if val & 0x40:
+            val |= 0x80
+        if val > 127:
+            val -= 256
+        decoded.append(val)
 
-        output_val = uVar28 & 0x7F
-        if output_val & 0x40:
-            output_val |= 0x80
-        if output_val > 127:
-            output_val -= 256
-        decoded.append(output_val)
+        carry = ((byte & ((1 << shift) - 1)) << (6 - mod)) & 0xFF
 
-        mask = (1 << uVar36) - 1
-        uVar28 = ((bVar21 & mask) << (6 - iVar31)) & 0xFF
+        if shift == 7:
+            val = carry & 0x7F
+            if val & 0x40:
+                val |= 0x80
+            if val > 127:
+                val -= 256
+            decoded.append(val)
+            carry = 0
 
-        if uVar36 == 7:
-            output_val = uVar28 & 0x7F
-            if output_val & 0x40:
-                output_val |= 0x80
-            if output_val > 127:
-                output_val -= 256
-            decoded.append(output_val)
-            uVar28 = 0
+    tail = data[0x13] & 0x3F
+    if tail & 0x20:
+        tail |= 0xC0
+    if tail > 127:
+        tail -= 256
+    decoded.append(tail)
 
-    final_val = data[0x13] & 0x3F
-    if final_val & 0x20:
-        final_val |= 0xC0
-    if final_val > 127:
-        final_val -= 256
-    decoded.append(final_val)
-
-    return decoded if decoded else None
+    return decoded or None
 
 
-def parse_gsr(data: bytes) -> Optional[List[float]]:
-    """
-    Parse GSR/EDA packet into list of values in microsiemens.
-    Uses 24-bit big endian encoding, 6 samples per packet.
-    """
+def parse_gsr(data: bytes):
+    """Parse GSR/EDA packet — 24-bit BE samples → microsiemens."""
     if len(data) < 20:
         return None
-
     readings = []
-    i = 0
-
-    while i + 3 <= len(data) - 2:
-        byte1 = data[i]
-        byte2 = data[i + 1]
-        byte3 = data[i + 2]
-
-        raw_value = (byte1 << 16) | (byte2 << 8) | byte3
-        eda_microsiemens = 1000000.0 / raw_value if raw_value > 0 else 0
-
-        readings.append(eda_microsiemens)
-        i += 3
-
-    return readings if readings else None
+    for i in range(0, len(data) - 2, 3):
+        raw = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2]
+        readings.append(1_000_000.0 / raw if raw else 0.0)
+    return readings or None
 
 
-def parse_temp(data: bytes) -> Optional[List[float]]:
-    """
-    Parse temperature packet into list of values in Celsius.
-    Uses unsigned 16-bit little endian encoding, 4 samples per packet.
-    """
+def parse_temp(data: bytes):
+    """Parse temperature packet — u16 LE samples → °C."""
     if len(data) < 12:
         return None
-
-    temp_readings = []
-    i = 0
-
-    while i < 8:
-        raw = struct.unpack_from('<H', data, i)[0]
-        temp = ((raw * 0.02) - 276.0) + TEMP_CALIBRATION
-        temp_readings.append(temp)
-        i += 2
-
-    return temp_readings if temp_readings else None
+    readings = []
+    for i in range(0, 8, 2):
+        raw = struct.unpack_from("<H", data, i)[0]
+        readings.append(raw * 0.02 - 276.0 + TEMP_CALIBRATION)
+    return readings or None
 
 
-def parse_acc(data: bytes) -> Optional[List[Tuple[int, int, int]]]:
-    """
-    Parse accelerometer packet into list of (x, y, z) tuples.
-    Values are raw, divide by 64.0 to get g-force.
-    """
-    acc_readings = []
-    i = 0
-
-    while i + 3 <= len(data):
+def parse_acc(data: bytes):
+    """Parse accelerometer packet — signed byte triplets (raw; /64 for g)."""
+    readings = []
+    for i in range(0, len(data) - 2, 3):
         try:
-            x, y, z = struct.unpack_from('<bbb', data, i)
-            acc_readings.append((x, y, z))
-            i += 3
+            readings.append(struct.unpack_from("<bbb", data, i))
         except struct.error:
             break
-
-    return acc_readings if acc_readings else None
+    return readings or None

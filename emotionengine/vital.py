@@ -49,3 +49,10 @@ class VitalStress:
 
     def get_stress(self):
         return self.stress
+
+    def get_buffer(self):
+        return numpy.array(self.buffer)
+
+    @property
+    def is_calibrated(self):
+        return not self.calibration_mode

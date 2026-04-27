@@ -1,6 +1,6 @@
 from collections import deque
 from scipy.signal import lfilter
-from emotionengine import ppg_findpeaks
+from .msptdfast import ppg_findpeaks
 import numpy
 
 

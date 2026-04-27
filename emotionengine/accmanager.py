@@ -18,3 +18,9 @@ class ACCManager:
 
     def get_moving(self):
         return self._moving
+
+    @property
+    def variance(self):
+        if len(self.buffer) == 32:
+            return float(numpy.var(self.buffer))
+        return 0.0

@@ -1,33 +1,32 @@
-import asyncio
-from py_e4lib import E4Client
+from .py_e4lib import E4Client
 
 
 class E4Controller:
-    """
-    WIP e4 control script. 
-    """
-
     def __init__(self):
-        self.client = E4Client
+        self.client = None
+        self.connected = False
 
-    async def connect(self, bvp_func, eda_func, acc_func):
-        for _ in range(3):
-            self.client = await E4Client.find()
+    async def connect(self, bvp_func, eda_func, acc_func, retries=3, timeout=10):
+        for _ in range(retries):
+            self.client = await E4Client.find(timeout)
             if self.client is not None:
                 break
 
         if self.client is None:
             return False
 
-        async with self.client:
-            self.client.enable_bvp(bvp_func)
-            self.client.enable_gsr(eda_func)
-            self.client.enable_acc(acc_func)
+        await self.client.__aenter__()
+        self.client.enable_bvp(bvp_func)
+        self.client.enable_gsr(eda_func)
+        self.client.enable_acc(acc_func)
 
+        self.connected = True
         return True
 
     async def start(self):
         await self.client.start()
 
     async def end(self):
-        await self.client.stop()
+        if self.client:
+            await self.client.stop()
+            self.connected = False

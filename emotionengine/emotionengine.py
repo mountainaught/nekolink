@@ -1,5 +1,7 @@
 import asyncio
-from emotionengine import BVPManager, ACCManager, VitalStress
+from .bvpmanager import BVPManager
+from .accmanager import ACCManager
+from .vital import VitalStress
 import math
 
 class EmotionEngine:
@@ -37,6 +39,9 @@ class EmotionEngine:
 
     def acc_parser(self):
         return self.acc.parse
+
+    def get_buffers(self):
+        return self.eda.get_buffer(), self.hr.get_buffer(), self.hrv.get_buffer()
 
     def map(self, t):
         A = 1.0 - self.stress

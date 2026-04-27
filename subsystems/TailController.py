@@ -1,69 +1,69 @@
 import math
-import board
-from adafruit_motor import servo
-from adafruit_pca9685 import PCA9685
+import logging
+
+log = logging.getLogger(__name__)
+
 
 class TailController:
     """
-    3-cable continuum tail controller
-    
-    servo positions on base (clockwise from top):
-    - blue:   300° (upper-left)
-    - red:    60°  (upper-right)
-    - yellow: 180° (bottom)
-    
-    x/y coords are -1.0 to 1.0
+    3-cable continuum tail controller.
 
-    params are channel value for blue, red, yellow servo
+    Servo positions on base (clockwise from top):
+      blue: 300°  red: 60°  yellow: 180°
+
+    x/y coords are -1.0 to 1.0
     """
 
-    _BLUE_DIR   = 150.0
-    _RED_DIR    = 30.0
-    _YELLOW_DIR = 270.0
-
-    _SCALE = 180.0  # internal servo unit range
+    _DIRS = {
+        "blue": 150.0,
+        "red": 30.0,
+        "yellow": 270.0,
+    }
+    _SCALE = 180.0
 
     def __init__(self, blue_ch, red_ch, yellow_ch):
-        i2c = board.I2C()
-        self.pca = PCA9685(i2c)
-        self.pca.frequency = 50
+        self._channels = {"blue": blue_ch, "red": red_ch, "yellow": yellow_ch}
+        self.pca = None
+        self.servos = {}
+        self.initialized = False
 
-        self.blue   = servo.Servo(self.pca.channels[blue_ch], min_pulse=500, max_pulse=2500)
-        self.red    = servo.Servo(self.pca.channels[red_ch], min_pulse=500, max_pulse=2500)
-        self.yellow = servo.Servo(self.pca.channels[yellow_ch], min_pulse=500, max_pulse=2500)
+        self._vecs = {k: self._to_vec(d) for k, d in self._DIRS.items()}
+        self._offsets = {"blue": 0, "red": 0, "yellow": 0}
+        self._scales = {"blue": 1.0, "red": 1.0, "yellow": 1.0}
 
-        self._bdir = self._to_vec(self._BLUE_DIR)
-        self._rdir = self._to_vec(self._RED_DIR)
-        self._ydir = self._to_vec(self._YELLOW_DIR)
+    def initialize(self):
+        try:
+            import board
+            from adafruit_pca9685 import PCA9685
+            from adafruit_motor import servo as servo_mod
 
-        # calibration
-        self._offsets = [0, 0, 0]   # added to final servo values (b, r, y)
-        self._scales  = [1.0, 1.0, 1.0]  # multiplier per servo
+            i2c = board.I2C()
+            self.pca = PCA9685(i2c)
+            self.pca.frequency = 50
+            self.servos = {
+                name: servo_mod.Servo(self.pca.channels[ch], min_pulse=500, max_pulse=2500)
+                for name, ch in self._channels.items()
+            }
+            self.initialized = True
+            return True, "PCA9685 connected, servos ready"
+        except Exception as e:
+            return False, str(e)
 
-    # ── calibration ──────────────────────────────────────────────
-
-    def calibrate(self, b_offset=0, r_offset=0, y_offset=0,
-                        b_scale=1.0, r_scale=1.0, y_scale=1.0):
+    def calibrate(self, offsets=None, scales=None):
         """
-        offsets: added to final servo value before sending
-                 e.g. theory says 100 but reality needs 120 → b_offset=20
-        scales:  multiplier if one servo pulls harder/weaker than others
-                 e.g. blue is weaker → b_scale=1.2 to compensate
+        offsets: {"blue": 20, ...} — added to final servo value
+        scales:  {"blue": 1.2, ...} — multiplier per servo
         """
-        self._offsets = [b_offset, r_offset, y_offset]
-        self._scales  = [b_scale,  r_scale,  y_scale]
+        if offsets:
+            self._offsets.update(offsets)
+        if scales:
+            self._scales.update(scales)
 
-    def get_calibration(self):
-        """print current calibration so you can save it"""
-        b, r, y = self._offsets
-        bs, rs, ys = self._scales
-        print(f"offsets → b:{b}  r:{r}  y:{y}")
-        print(f"scales  → b:{bs} r:{rs} y:{ys}")
-        print(f"tail.calibrate(b_offset={b}, r_offset={r}, y_offset={y},")
-        print(f"               b_scale={bs}, r_scale={rs}, y_scale={ys})")
+    @property
+    def calibration(self):
+        return {"offsets": dict(self._offsets), "scales": dict(self._scales)}
 
-    # ── math helpers ─────────────────────────────────────────────
-
+    # internal maths to convert x, y to r,b,y servo values
     @staticmethod
     def _to_vec(deg):
         rad = math.radians(deg)
@@ -71,83 +71,72 @@ class TailController:
 
     @staticmethod
     def _solve(x, y, d1, d2):
-        det = d1[0]*d2[1] - d1[1]*d2[0]
+        det = d1[0] * d2[1] - d1[1] * d2[0]
         if abs(det) < 1e-9:
             return 0.0, 0.0
-        s1 = (x*d2[1] - y*d2[0]) / det
-        s2 = (d1[0]*y - d1[1]*x) / det
-        return s1, s2
+        return (x * d2[1] - y * d2[0]) / det, (d1[0] * y - d1[1] * x) / det
 
-    def _clamp(self, v):
-        return max(0, min(180, round(v)))
+    def _clamp(self, name, val):
+        return max(0, min(180, round(val * self._scales[name] + self._offsets[name])))
 
-    def _apply_calibration(self, b, r, y):
-        """apply scale then offset, then clamp"""
-        b = self._clamp(b * self._scales[0] + self._offsets[0])
-        r = self._clamp(r * self._scales[1] + self._offsets[1])
-        y = self._clamp(y * self._scales[2] + self._offsets[2])
-        return (b, r, y)
+    # write to servos
+    def _write(self, b, r, y):
+        if not self.initialized:
+            return
 
-    # ── main interface ────────────────────────────────────────────
+        vals = {
+            "blue": self._clamp("blue", b),
+            "red": self._clamp("red", r),
+            "yellow": self._clamp("yellow", y),
+        }
+        try:
+            for name, v in vals.items():
+                self.servos[name].angle = v
+            log.debug("servos: %s", vals)
+        except ValueError:
+            log.warning("servo at angle limit")
+
+    # actual front facing stuff
 
     def forward(self, b, r, y):
-        """raw servo values (0-180) → (x, y) in -1.0 to 1.0"""
-        x  = b*self._bdir[0] + r*self._rdir[0] + y*self._ydir[0]
-        yp = b*self._bdir[1] + r*self._rdir[1] + y*self._ydir[1]
+        vecs = self._vecs
+        x = b * vecs["blue"][0] + r * vecs["red"][0] + y * vecs["yellow"][0]
+        yp = b * vecs["blue"][1] + r * vecs["red"][1] + y * vecs["yellow"][1]
         return (x / self._SCALE, yp / self._SCALE)
 
     def inverse(self, x, y):
-        """(x, y) in -1.0 to 1.0 → calibrated (b, r, y) servo values"""
-        # scale up to servo units
-        x  = x * self._SCALE
-        y  = y * self._SCALE
+        x *= self._SCALE
+        y *= self._SCALE
 
         if x == 0 and y == 0:
             return (0, 0, 0)
 
         angle = math.degrees(math.atan2(y, x)) % 360
+        v = self._vecs
 
-        if 30 <= angle < 150:       # upper region - blue + red
-            b, r  = self._solve(x, y, self._bdir, self._rdir)
-            yv    = 0.0
-        elif 150 <= angle < 270:    # lower-left - blue + yellow
-            b, yv = self._solve(x, y, self._bdir, self._ydir)
-            r     = 0.0
-        else:                       # lower-right - red + yellow
-            r, yv = self._solve(x, y, self._rdir, self._ydir)
-            b     = 0.0
+        if 30 <= angle < 150:
+            b, r = self._solve(x, y, v["blue"], v["red"])
+            yv = 0.0
+        elif 150 <= angle < 270:
+            b, yv = self._solve(x, y, v["blue"], v["yellow"])
+            r = 0.0
+        else:
+            r, yv = self._solve(x, y, v["red"], v["yellow"])
+            b = 0.0
 
-        return self._apply_calibration(b, r, yv)
+        return (b, r, yv)
 
-    def move(self, state):
-        """move with raw (b, r, y) servo values, still applies calibration"""
-        state = self._apply_calibration(*state)
-        try:
-            self.blue.angle   = state[0]
-            self.red.angle    = state[1]
-            self.yellow.angle = state[2]
-            print(f"b{state[0]} r{state[1]} y{state[2]}")
-        except ValueError:
-            print("servo at angle limit")
+    def move(self, b, r, y):
+        self._write(b, r, y)
 
     def move_to(self, x, y):
-        """move tip to (x, y) in -1.0 to 1.0"""
-        state = self.inverse(x, y)
-        try:
-            self.blue.angle   = state[0]
-            self.red.angle    = state[1]
-            self.yellow.angle = state[2]
-            print(f"b{state[0]} r{state[1]} y{state[2]}")
-        except ValueError:
-            print("servo at angle limit")
+        self._write(*self.inverse(x, y))
 
     def where(self):
-        """returns current estimated tip position in -1.0 to 1.0"""
-        return self.forward(self.blue.angle or 0,
-                           self.red.angle  or 0,
-                           self.yellow.angle or 0)
-    
+        if not self.initialized:
+            return {"blue": None, "red": None, "yellow": None}
+        return self.forward(*(self.servos[k].angle or 0 for k in ("blue", "red", "yellow")))
+
     def cleanup(self):
-        """called when nekolink script is terminated"""
-        self.move((0,0,0))
+        self.move(0, 0, 0)
         self.pca.deinit()
