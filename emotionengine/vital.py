@@ -23,6 +23,9 @@ class VitalStress:
         self.calibration_mode = False
 
     def parse(self, values):
+        if not hasattr(values, '__iter__'):
+            values = [values]
+    
         if not self.calibration_mode:
             current_mean = numpy.mean(values)
 

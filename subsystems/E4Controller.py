@@ -15,11 +15,13 @@ class E4Controller:
         if self.client is None:
             return False
 
-        await self.client.__aenter__()
-        self.client.enable_bvp(bvp_func)
-        self.client.enable_gsr(eda_func)
-        self.client.enable_acc(acc_func)
+        # register callbacks
+        self.client.on("bvp", bvp_func)
+        self.client.on("gsr", eda_func)
+        self.client.on("acc", acc_func)
 
+        # connect but DON'T start streaming yet
+        await self.client.connect()
         self.connected = True
         return True
 

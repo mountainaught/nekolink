@@ -1,213 +1,240 @@
-"""
-Screen 2 — Main menu. Manual init, parameters, launch.
-"""
-
+import argparse
 import asyncio
+import time
 
-from textual import on, work
-from textual.screen import Screen
-from textual.containers import Container, Vertical
-from textual.widgets import Button, Label, RichLog, Rule
+from rich.panel import Panel
+from rich.prompt import Prompt, Confirm
+from rich.live import Live
 
-from .helpers import ts, LOGO
+from .helpers import (
+    con, LOGO, ts,
+    check_i2c, check_bluetooth, restart_bluetooth, make_bar,
+)
+from .boot import boot_sequence
+from .run import run_loop
+from .calibration import tail_calibration
 
-from emotionengine import EmotionEngine
-from subsystems.E4Controller import E4Controller
+
+def show_menu(state):
+    con.clear()
+    con.print(LOGO)
+    con.print()
+
+    t = "[green]✓[/green]" if state["tail"] else "[red]✗[/red]"
+    e = "[green]✓[/green]" if state["ee"] else "[red]✗[/red]"
+    c = "[green]✓[/green]" if state["e4"] else "[red]✗[/red]"
+    tc = "[green]✓[/green]" if state["tail_cal"] else "[red]✗[/red]"
+    ec = "[green]✓[/green]" if state["ee_cal"] else "[red]✗[/red]"
+    con.print(f"  TAIL [{t}]  ENGINE [{e}]  E4 [{c}]  TAIL CAL [{tc}]  EE CAL [{ec}]\n")
+
+    options = {
+        "1": "Initialize Tail" + (" [dim](done)[/dim]" if state["tail"] else ""),
+        "2": "Initialize Emotion Engine" + (" [dim](done)[/dim]" if state["ee"] else ""),
+        "3": "Connect E4" + (" [dim](done)[/dim]" if state["e4"] else ""),
+        "4": "Initialize All",
+        "5": "Calibrate Tail" + (" [dim](done)[/dim]" if state["tail_cal"] else ""),
+        "6": "Calibrate E4 + Emotion Engine" + (" [dim](done)[/dim]" if state["ee_cal"] else ""),
+        "7": "▸ Run NekoLink",
+        "8": "Exit",
+    }
+
+    for k, v in options.items():
+        con.print(f"  [green][{k}][/green] {v}")
+
+    con.print()
+    return Prompt.ask("[green]select[/green]", choices=list(options.keys()))
 
 
-class MenuScreen(Screen):
+async def menu_loop():
+    parser = argparse.ArgumentParser(description="NekoLink — emotion-driven kinetic interface")
+    parser.add_argument("--skip-intro", action="store_true", help="skip boot sequence")
+    args = parser.parse_args()
 
-    def compose(self):
-        with Container(id="menu-container"):
-            yield Label(LOGO)
-            yield Rule()
+    from emotionengine import EmotionEngine
+    from subsystems.TailController import TailController
+    from subsystems.E4Controller import E4Controller
 
-            # status bar
-            yield Label("", id="menu-status")
+    if args.skip_intro:
+        i2c_ok, _ = check_i2c()
+        bt_ok, _ = check_bluetooth()
+        con.print("[dim green]boot skipped[/dim green]\n")
+    else:
+        i2c_ok, bt_ok = boot_sequence()
 
-            # init section
-            yield Label("[bold green]── INITIALIZATION ──[/bold green]", classes="menu-section")
-            yield Button("Initialize Tail (I2C/PCA9685)", id="btn-init-tail", classes="menu-btn")
-            yield Button("Initialize Emotion Engine", id="btn-init-ee", classes="menu-btn")
-            yield Button("Connect E4 Wristband (BLE)", id="btn-init-e4", classes="menu-btn")
-            yield Button("Initialize All", id="btn-init-all", classes="menu-btn", variant="success")
+    tail = TailController(0, 2, 4)
+    ee = None
+    e4 = None
+    e4_fails = 0
 
-            yield Rule()
+    state = {"tail": False, "ee": False, "e4": False, "tail_cal": False, "ee_cal": False}
 
-            # actions
-            yield Label("[bold green]── ACTIONS ──[/bold green]", classes="menu-section")
-            yield Button("▸ Run NekoLink", id="btn-run", classes="menu-btn", variant="success")
-            yield Button("Device Stats", id="btn-stats", classes="menu-btn")
-            yield Button("Exit", id="btn-exit", classes="menu-btn", variant="error")
+    while True:
+        choice = show_menu(state)
 
-            yield Rule()
+        if choice == "1" and not state["tail"]:
+            if not i2c_ok:
+                con.print("[red]I2C unavailable[/red]")
+                time.sleep(0.5)
+                continue
+            con.print("[green]initializing tail...[/green]")
+            ok, msg = tail.initialize()
+            state["tail"] = ok
+            con.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
+            time.sleep(0.5)
 
-            # log output for init feedback
-            yield RichLog(id="menu-log", markup=True, auto_scroll=True)
+        elif choice == "2" and not state["ee"]:
+            con.print("[green]creating emotion engine...[/green]")
+            ee = EmotionEngine()
+            state["ee"] = True
+            con.print("[green]emotion engine ready[/green]")
+            time.sleep(0.5)
 
-    def on_mount(self):
-        self._refresh_buttons()
-        self._update_status()
+        elif choice == "3" and not state["e4"]:
+            if not state["ee"]:
+                con.print("[red]initialize emotion engine first[/red]")
+                time.sleep(0.5)
+                continue
+            if not bt_ok:
+                if Confirm.ask("[yellow]bluetooth unavailable. restart bluetooth service?[/yellow]"):
+                    passwd = Prompt.ask("[yellow]sudo password[/yellow]", password=True)
+                    ok, msg = await restart_bluetooth(passwd)
+                    if ok:
+                        con.print(f"[green]{msg}[/green]")
+                        bt_ok, _ = check_bluetooth()
+                    else:
+                        con.print(f"[red]{msg}[/red]")
+                time.sleep(0.5)
+                continue
 
-    # ── status ──
+            con.print("[green]scanning for E4...[/green]")
+            e4 = E4Controller()
+            ok = await e4.connect(ee.bvp_parser(), ee.eda_parser(), ee.acc_parser())
+            if ok:
+                state["e4"] = True
+                e4_fails = 0
+                con.print("[bold green]E4 connected[/bold green]")
+            else:
+                e4_fails += 1
+                con.print(f"[red]connection failed (attempt {e4_fails})[/red]")
+                if e4_fails >= 3:
+                    if Confirm.ask("[yellow]3+ failures. restart bluetooth?[/yellow]"):
+                        passwd = Prompt.ask("[yellow]sudo password[/yellow]", password=True)
+                        ok, msg = await restart_bluetooth(passwd)
+                        if ok:
+                            con.print(f"[green]{msg}[/green]")
+                            bt_ok, _ = check_bluetooth()
+                            e4_fails = 0
+                        else:
+                            con.print(f"[red]{msg}[/red]")
+            time.sleep(0.5)
 
-    def _update_status(self):
-        tail = "✓" if self.app.tail_inited else "✗"
-        ee = "✓" if self.app.ee_inited else "✗"
-        e4 = "✓" if self.app.e4_inited else "✗"
+        elif choice == "4":
+            if not state["tail"] and i2c_ok:
+                con.print("[green]initializing tail...[/green]")
+                ok, msg = tail.initialize()
+                state["tail"] = ok
+                con.print(f"[green]  {msg}[/green]" if ok else f"[red]  {msg}[/red]")
 
-        status = f"[green]TAIL [{tail}]  EE [{ee}]  E4 [{e4}][/green]"
-        self.query_one("#menu-status", Label).update(status)
+            if not state["ee"]:
+                con.print("[green]creating emotion engine...[/green]")
+                ee = EmotionEngine()
+                state["ee"] = True
+                con.print("[green]  emotion engine ready[/green]")
 
-    def _refresh_buttons(self):
-        self._gray_if_done("btn-init-tail", self.app.tail_inited)
-        self._gray_if_done("btn-init-ee", self.app.ee_inited)
-        self._gray_if_done("btn-init-e4", self.app.e4_inited)
-        self._gray_if_done("btn-init-all", self.app.all_inited)
+            if not state["e4"] and state["ee"] and bt_ok:
+                con.print("[green]scanning for E4...[/green]")
+                e4 = E4Controller()
+                ok = await e4.connect(ee.bvp_parser(), ee.eda_parser(), ee.acc_parser())
+                if ok:
+                    state["e4"] = True
+                    e4_fails = 0
+                    con.print("[bold green]  E4 connected[/bold green]")
+                else:
+                    e4_fails += 1
+                    con.print(f"[red]  E4 failed (attempt {e4_fails})[/red]")
+                    if e4_fails >= 3:
+                        con.print("[yellow]  consider restarting bluetooth[/yellow]")
 
-        # e4 depends on ee
-        e4_btn = self.query_one("#btn-init-e4", Button)
-        if not self.app.ee_inited and not self.app.e4_inited:
-            e4_btn.disabled = True
-            e4_btn.label = "Connect E4 (needs Emotion Engine first)"
-        elif self.app.e4_inited:
-            e4_btn.label = "Connect E4 Wristband (BLE)"
+            if all(state.values()):
+                con.print("\n[bold green]all systems initialized[/bold green]")
+            else:
+                skipped = [k for k, v in state.items() if not v]
+                con.print(f"\n[yellow]skipped: {', '.join(skipped)}[/yellow]")
+            time.sleep(0.5)
 
-        # i2c / bt warnings
-        tail_btn = self.query_one("#btn-init-tail", Button)
-        if not self.app.i2c_ok and not self.app.tail_inited:
-            tail_btn.disabled = True
-            tail_btn.label = "Initialize Tail (I2C unavailable)"
+        elif choice == "5" and not state["tail_cal"]:
+            if not state["tail"]:
+                con.print("[red]initialize tail first[/red]")
+                time.sleep(0.5)
+                continue
 
-        e4_btn = self.query_one("#btn-init-e4", Button)
-        if not self.app.bt_ok and not self.app.e4_inited:
-            e4_btn.disabled = True
-            e4_btn.label = "Connect E4 (Bluetooth unavailable)"
+            if tail_calibration(tail):
+                state["tail_cal"] = True
+                con.print("[bold green]tail calibration saved[/bold green]")
+            else:
+                con.print("[yellow]tail calibration cancelled[/yellow]")
+            time.sleep(0.5)
 
-    def _gray_if_done(self, btn_id, done):
-        btn = self.query_one(f"#{btn_id}", Button)
-        if done:
-            btn.add_class("init-done")
-            btn.disabled = True
-        else:
-            btn.remove_class("init-done")
-            btn.disabled = False
+        elif choice == "6" and not state["ee_cal"]:
+            if not state["ee"] or not state["e4"]:
+                con.print("[red]initialize emotion engine and connect E4 first[/red]")
+                time.sleep(0.5)
+                continue
 
-    def _log(self, msg):
-        self.query_one("#menu-log", RichLog).write(f"[green][{ts()}][/green] {msg}")
+            con.print("[green]starting E4 stream...[/green]")
+            await e4.start()
 
-    # ── button handlers ──
+            con.print("[yellow]beginning 60s emotion calibration[/yellow]")
+            con.print("[dim]remain calm, avoid movement or distressing thoughts[/dim]\n")
 
-    @on(Button.Pressed, "#btn-init-tail")
-    def on_init_tail(self):
-        self._do_init_tail()
+            cal_start = time.monotonic()
 
-    @on(Button.Pressed, "#btn-init-ee")
-    def on_init_ee(self):
-        self._do_init_ee()
+            async def _cal_display():
+                with Live(console=con, refresh_per_second=4) as live:
+                    while not ee.is_calibrated:
+                        elapsed = time.monotonic() - cal_start
+                        remaining = max(0, 60 - elapsed)
 
-    @on(Button.Pressed, "#btn-init-e4")
-    def on_init_e4(self):
-        self._do_init_e4()
+                        hr = ee.current_hr
+                        hrv = ee.current_hrv
+                        eda = ee.current_eda
 
-    @on(Button.Pressed, "#btn-init-all")
-    def on_init_all(self):
-        self._do_init_all()
+                        text = (
+                            f"[green]calibrating... {remaining:4.1f}s remaining[/green]\n"
+                            f"[green]{make_bar(elapsed, 60.0)}[/green]\n\n"
+                            f"[dim green]♥ HR:  {f'{hr:.0f} bpm' if hr else 'waiting...'}[/dim green]\n"
+                            f"[dim green]↕ HRV: {f'{hrv:.1f} ms' if hrv else 'waiting...'}[/dim green]\n"
+                            f"[dim green]⚡ EDA: {f'{eda:.2f} μS' if eda else 'waiting...'}[/dim green]\n"
+                            f"[dim green]● ACC: {'moving' if ee.is_moving else 'still'}"
+                            f" (var: {ee.acc_variance:.6f})[/dim green]\n"
+                        )
+                        live.update(
+                            Panel(text, title="[green]calibration[/green]", border_style="green")
+                        )
+                        await asyncio.sleep(0.250)
 
-    @on(Button.Pressed, "#btn-run")
-    def on_run(self):
-        self._do_run()
+            await asyncio.gather(
+                ee.calibrate(),
+                _cal_display(),
+            )
 
-    @on(Button.Pressed, "#btn-stats")
-    def on_stats(self):
-        self._log("[yellow]stats view not implemented yet[/yellow]")
+            state["ee_cal"] = True
+            con.print("[bold green]calibration complete[/bold green]")
+            time.sleep(0.5)
 
-    @on(Button.Pressed, "#btn-exit")
-    def on_exit(self):
-        self.app.exit()
+        elif choice == "7":
+            if not all(state.values()):
+                missing = [k for k, v in state.items() if not v]
+                con.print(f"[red]not ready — missing: {', '.join(missing)}[/red]")
+                time.sleep(0.5)
+                continue
 
-    # ── init workers ──
+            con.print("\n[bold green]▸ launching nekolink...[/bold green]")
+            time.sleep(0.5)
+            await run_loop(ee, tail, e4)
+            state["e4"] = False
+            state["ee_cal"] = False
 
-    @work(exclusive=True)
-    async def _do_init_tail(self):
-        self._log("initializing tail controller...")
-        ok, msg = self.app.tail.initialize()
-        if ok:
-            self.app.tail_inited = True
-            self._log(f"[bold green]tail: {msg}[/bold green]")
-        else:
-            self._log(f"[bold red]tail failed: {msg}[/bold red]")
-        self._refresh_buttons()
-        self._update_status()
-
-    @work(exclusive=True)
-    async def _do_init_ee(self):
-        self._log("creating emotion engine...")
-        self.app.ee = EmotionEngine()
-        self.app.ee_inited = True
-        self._log("[bold green]emotion engine ready[/bold green]")
-        self._refresh_buttons()
-        self._update_status()
-
-    @work(exclusive=True)
-    async def _do_init_e4(self):
-        if not self.app.ee_inited:
-            self._log("[red]emotion engine must be initialized first[/red]")
-            return
-
-        self._log("scanning for E4 wristband...")
-        self.app.e4 = E4Controller()
-        ee = self.app.ee
-        ok = await self.app.e4.connect(
-            ee.bvp_parser(), ee.eda_parser(), ee.acc_parser()
-        )
-
-        if ok:
-            self.app.e4_inited = True
-            self.app.e4_fail_count = 0
-            self._log("[bold green]E4 connected and streams registered[/bold green]")
-        else:
-            self.app.e4_fail_count += 1
-            self._log(f"[bold red]E4 connection failed (attempt {self.app.e4_fail_count})[/bold red]")
-
-            if self.app.e4_fail_count >= 3:
-                self._log("[yellow]3+ failures — consider restarting bluetooth[/yellow]")
-                self._log("[yellow]run: sudo systemctl restart bluetooth[/yellow]")
-                # TODO: add bluetooth restart button/prompt here
-
-        self._refresh_buttons()
-        self._update_status()
-
-    @work(exclusive=True)
-    async def _do_init_all(self):
-        if not self.app.tail_inited:
-            await self._do_init_tail.__wrapped__(self)
-        if not self.app.ee_inited:
-            await self._do_init_ee.__wrapped__(self)
-        if not self.app.e4_inited:
-            await self._do_init_e4.__wrapped__(self)
-        self._log("[green]initialization sequence complete[/green]")
-
-    # ── run ──
-
-    @work(exclusive=True)
-    async def _do_run(self):
-        if not self.app.all_inited:
-            self._log("[yellow]running auto-init first...[/yellow]")
-            await self._do_init_all.__wrapped__(self)
-
-        if not self.app.all_inited:
-            self._log("[red]init failed, cannot start[/red]")
-            return
-
-        if not self.app.ee.is_calibrated:
-            self._log("[yellow]starting 60s emotion calibration...[/yellow]")
-            self._log("[dim]remain calm, avoid movement or distressing thoughts[/dim]")
-            self.app.calibration_start = __import__("time").monotonic()
-            await self.app.e4.start()
-            await self.app.ee.calibrate()
-            self._log("[bold green]calibration complete[/bold green]")
-
-        self._log("[bold green]launching nekolink...[/bold green]")
-        await asyncio.sleep(0.5)
-        self.app.goto_run()
+        elif choice == "8":
+            con.print("[green]goodbye~ nyaa[/green]")
+            break

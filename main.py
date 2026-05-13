@@ -1,5 +1,5 @@
-from tui import NekoLinkApp
+import asyncio
+from tui.menu import menu_loop
 
 if __name__ == "__main__":
-    app = NekoLinkApp()
-    app.run()
+    asyncio.run(menu_loop())

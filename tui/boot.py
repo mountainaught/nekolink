@@ -1,148 +1,101 @@
-"""
-Screen 1 — NASA-log-style boot sequence.
-Runs real hardware checks, offers retry on failure.
-"""
-
-import asyncio
+import glob
+import os
+import platform
 import random
+import time
 
-from textual import on, work
-from textual.binding import Binding
-from textual.screen import Screen
-from textual.widgets import RichLog, Label
-from textual.reactive import reactive
-
-from .helpers import (
-    ts, LOGO, VERSION, BOOT_MODULES,
-    get_system_ident, fake_hex_line,
-    check_i2c, check_bluetooth,
-)
+from .helpers import con, LOGO, VERSION, ts, check_i2c, check_bluetooth
 
 
-class BootScreen(Screen):
+def boot_sequence():
+    con.clear()
+    con.print(LOGO)
+    con.print("[green]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/green]")
+    con.print(f"[dim green] emotion-driven kinetic interface v{VERSION}[/dim green]")
+    con.print("[green]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/green]\n")
+    time.sleep(0.5)
 
-    BINDINGS = [
-        Binding("enter", "proceed", "Continue", show=False),
-    ]
+    # system ident
+    con.print(f"[green][{ts()}] SYSTEM IDENTIFICATION[/green]")
+    for k, v in {
+        "HOST": platform.node(),
+        "ARCH": platform.machine(),
+        "KERN": platform.release(),
+        "PYRT": platform.python_version(),
+        "PID": str(os.getpid()),
+    }.items():
+        con.print(f"[dim green]  {k:5s}: {v}[/dim green]")
+        time.sleep(0.07)
+    con.print()
+    time.sleep(0.3)
 
-    boot_done: reactive[bool] = reactive(False)
+    # modules
+    con.print(f"[green][{ts()}] LOADING CORE MODULES[/green]")
+    for mod in [
+        "emotionengine.core", "emotionengine.bvp_processor",
+        "emotionengine.acc_processor", "emotionengine.vital_signs",
+        "emotionengine.msptd_fast", "subsystems.tail_driver",
+        "subsystems.e4_biometric", "subsystems.py_e4lib.client",
+    ]:
+        dots = "·" * (42 - len(mod))
+        con.print(f"[green]  {mod} {dots} [bold green]OK[/bold green][/green]")
+        time.sleep(random.uniform(0.04, 0.12))
+    con.print()
+    time.sleep(0.3)
 
-    def compose(self):
-        yield RichLog(id="boot-log", markup=True, highlight=True, auto_scroll=True)
-        yield Label("[blink]▸ PRESS ENTER TO CONTINUE ◂[/blink]", id="boot-prompt")
+    # hardware preflight
+    con.print(f"[green][{ts()}] HARDWARE PREFLIGHT[/green]")
 
-    def on_mount(self):
-        self.run_boot()
+    i2c_ok, i2c_msg = check_i2c()
+    if i2c_ok:
+        con.print(f"[green]  I2C bus ·························· [bold green]{i2c_msg}[/bold green][/green]")
+    else:
+        con.print(f"[red]  I2C bus ·························· [bold red]FAIL: {i2c_msg}[/bold red][/red]")
+    time.sleep(0.2)
 
-    def action_proceed(self):
-        if self.boot_done:
-            self.app.goto_menu()
+    bt_ok, bt_msg = check_bluetooth()
+    if bt_ok:
+        con.print(f"[green]  Bluetooth ························ [bold green]{bt_msg}[/bold green][/green]")
+    else:
+        con.print(f"[red]  Bluetooth ························ [bold red]FAIL: {bt_msg}[/bold red][/red]")
+    time.sleep(0.2)
 
-    def watch_boot_done(self, done: bool):
-        if done:
-            self.query_one("#boot-prompt").styles.display = "block"
+    con.print()
+    con.print(f"[green][{ts()}] BOOT SEQUENCE COMPLETE[/green]")
+    time.sleep(0.5)
 
-    # ── boot sequence ──
+    # code flash
+    con.print(f"\n[green][{ts()}] COMPILING RUNTIME ENVIRONMENT[/green]")
+    time.sleep(0.3)
 
-    @work(exclusive=True)
-    async def run_boot(self):
-        log = self.query_one("#boot-log", RichLog)
-        w = log.write
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    py_files = sorted(glob.glob(os.path.join(project_root, "**/*.py"), recursive=True))
 
-        await asyncio.sleep(0.3)
+    for filepath in py_files:
+        relpath = os.path.relpath(filepath, project_root)
+        con.print(f"[green]  ── {relpath} ──[/green]")
+        time.sleep(0.05)
 
-        # logo
-        for line in LOGO.strip().split("\n"):
-            w(line)
-            await asyncio.sleep(0.04)
+        try:
+            with open(filepath, "r") as f:
+                lines = f.readlines()
+        except Exception:
+            continue
 
-        w("[green]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/green]")
-        w(f"[dim green] emotion-driven kinetic interface v{VERSION}[/dim green]")
-        w("[green]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/green]")
-        w("")
-        await asyncio.sleep(0.5)
+        step = max(1, len(lines) // 20)
+        for i in range(0, len(lines), step):
+            line = lines[i].rstrip()
+            if not line:
+                continue
+            line = line.replace("[", "\\[")
+            con.print(f"[dim green]{line}[/dim green]")
+            time.sleep(0.008)
 
-        # system ident
-        w(f"[green][{ts()}] SYSTEM IDENTIFICATION[/green]")
-        for k, v in get_system_ident().items():
-            await asyncio.sleep(0.07)
-            w(f"[dim green]  {k}: {v}[/dim green]")
-        w("")
-        await asyncio.sleep(0.3)
+    con.print(f"\n[green][{ts()}] COMPILED {len(py_files)} MODULES[/green]")
+    time.sleep(0.3)
+    con.print(f"[green][{ts()}] LINKING...[/green]")
+    time.sleep(0.2)
+    con.print(f"[green][{ts()}] [bold green]READY[/bold green][/green]")
+    time.sleep(0.5)
 
-        # module loading
-        w(f"[green][{ts()}] LOADING CORE MODULES[/green]")
-        for mod in BOOT_MODULES:
-            dots = "·" * (42 - len(mod))
-            w(f"[green]  {mod} {dots} [bold green]OK[/bold green][/green]")
-            await asyncio.sleep(random.uniform(0.04, 0.12))
-        w("")
-        await asyncio.sleep(0.25)
-
-        # memory flavor
-        w(f"[green][{ts()}] MEMORY ALLOCATION[/green]")
-        for _ in range(4):
-            addr = random.randint(0x7F000000, 0x7FFFFFFF)
-            size = random.choice([64, 128, 256, 512])
-            w(f"[dim green]  0x{addr:08X}  alloc {size}KB[/dim green]")
-            await asyncio.sleep(0.04)
-        w(f"[green]  heap integrity ···················· [bold green]PASS[/bold green][/green]")
-        w("")
-        await asyncio.sleep(0.3)
-
-        # entropy flavor
-        w(f"[green][{ts()}] SEEDING ENTROPY POOL[/green]")
-        w(f"[dim green]  {fake_hex_line()}[/dim green]")
-        w(f"[dim green]  {fake_hex_line()}[/dim green]")
-        w(f"[green]  pool ready ························ [bold green]OK[/bold green][/green]")
-        w("")
-        await asyncio.sleep(0.35)
-
-        # real hardware checks
-        await self._hw_preflight(w)
-
-        # done
-        w("")
-        w(f"[green][{ts()}] BOOT SEQUENCE COMPLETE[/green]")
-        w("")
-        self.boot_done = True
-
-    async def _hw_preflight(self, w):
-        w(f"[green][{ts()}] HARDWARE PREFLIGHT[/green]")
-
-        # I2C check
-        i2c_ok, i2c_msg = check_i2c()
-        self.app.i2c_ok = i2c_ok
-        if i2c_ok:
-            w(f"[green]  I2C bus ·························· [bold green]{i2c_msg}[/bold green][/green]")
-        else:
-            w(f"[red]  I2C bus ·························· [bold red]FAIL[/bold red][/red]")
-            w(f"[dim red]    {i2c_msg}[/dim red]")
-
-        await asyncio.sleep(0.2)
-
-        # Bluetooth check
-        bt_ok, bt_msg = check_bluetooth()
-        self.app.bt_ok = bt_ok
-        if bt_ok:
-            w(f"[green]  Bluetooth ························ [bold green]{bt_msg}[/bold green][/green]")
-        else:
-            w(f"[red]  Bluetooth ························ [bold red]FAIL[/bold red][/red]")
-            w(f"[dim red]    {bt_msg}[/dim red]")
-
-        await asyncio.sleep(0.2)
-
-        # retry if either failed
-        if not i2c_ok or not bt_ok:
-            w("")
-            w(f"[yellow]  ⚠ {self._fail_summary(i2c_ok, bt_ok)}[/yellow]")
-            w(f"[yellow]  hardware issues won't block boot but will affect initialization.[/yellow]")
-
-    @staticmethod
-    def _fail_summary(i2c_ok, bt_ok):
-        fails = []
-        if not i2c_ok:
-            fails.append("I2C")
-        if not bt_ok:
-            fails.append("Bluetooth")
-        return f"{' and '.join(fails)} unavailable."
+    return i2c_ok, bt_ok

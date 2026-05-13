@@ -1,41 +1,27 @@
-"""
-Shared constants, hardware checks, formatting utils.
-"""
-
 import os
-import platform
-import random
 import asyncio
 from datetime import datetime
+from rich.console import Console
 
+con = Console()
 
 LOGO = (
-    "[bold cyan] ╔╗╔┌─┐┬┌─┌─┐┬  ┬┌┐┌┬┌─[/bold cyan]\n"
-    "[bold cyan] ║║║├┤ ├┴┐│ ││  ││││├┴┐[/bold cyan]\n"
-    "[bold cyan] ╝╚╝└─┘┴ ┴└─┘┴─┘┴┘└┘┴ ┴[/bold cyan]"
+    r"[bold cyan]             _         _ _       _    [/bold cyan]" "\n"
+    r"[bold cyan]            | |       | (_)     | |   [/bold cyan]" "\n"
+    r"[bold cyan]  _ __   ___| | _____ | |_ _ __ | | __[/bold cyan]" "\n"
+    r"[bold cyan] | '_ \ / _ \ |/ / _ \| | | '_ \| |/ /[/bold cyan]" "\n"
+    r"[bold cyan] | | | |  __/   < (_) | | | | | |   < [/bold cyan]" "\n"
+    r"[bold cyan] |_| |_|\___|_|\_\___/|_|_|_| |_|_|\_\ [/bold cyan]"
 )
 
 VERSION = "1.0.0"
 
-BOOT_MODULES = [
-    "emotionengine.core",
-    "emotionengine.bvp_processor",
-    "emotionengine.acc_processor",
-    "emotionengine.vital_signs",
-    "emotionengine.msptd_fast",
-    "subsystems.tail_driver",
-    "subsystems.e4_biometric",
-    "subsystems.py_e4lib.client",
-]
 
-
-def ts() -> str:
-    """Compact timestamp for log lines."""
+def ts():
     return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
-def check_i2c() -> tuple[bool, str]:
-    """Probe for PCA9685 on the I2C bus."""
+def check_i2c():
     try:
         if os.path.exists("/dev/i2c-1"):
             return True, "PCA9685 detected @ 0x40"
@@ -44,8 +30,7 @@ def check_i2c() -> tuple[bool, str]:
         return False, str(e)
 
 
-def check_bluetooth() -> tuple[bool, str]:
-    """Check if a Bluetooth adapter is up."""
+def check_bluetooth():
     try:
         r = os.popen("hciconfig 2>/dev/null").read()
         if "UP RUNNING" in r:
@@ -55,8 +40,7 @@ def check_bluetooth() -> tuple[bool, str]:
         return False, "hciconfig unavailable"
 
 
-async def restart_bluetooth(password: str) -> tuple[bool, str]:
-    """Restart bluetooth service via sudo. Returns (success, message)."""
+async def restart_bluetooth(password: str):
     try:
         proc = await asyncio.create_subprocess_exec(
             "sudo", "-S", "systemctl", "restart", "bluetooth",
@@ -66,7 +50,6 @@ async def restart_bluetooth(password: str) -> tuple[bool, str]:
         )
         stdout, stderr = await proc.communicate(input=f"{password}\n".encode())
         if proc.returncode == 0:
-            # give it a sec to come back up
             await asyncio.sleep(2)
             return True, "bluetooth service restarted"
         else:
@@ -75,24 +58,7 @@ async def restart_bluetooth(password: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def get_system_ident() -> dict[str, str]:
-    """System info dict for boot screen."""
-    return {
-        "HOST ": platform.node(),
-        "ARCH ": platform.machine(),
-        "KERN ": platform.release(),
-        "PYRT ": platform.python_version(),
-        "PID  ": str(os.getpid()),
-    }
-
-
-def fake_hex_line(n: int = 16) -> str:
-    """Random hex bytes for boot flavor text."""
-    return " ".join(f"{random.randint(0, 255):02x}" for _ in range(n))
-
-
-def make_bar(val: float, max_val: float, width: int = 30) -> str:
-    """ASCII progress bar with color thresholds."""
+def make_bar(val, max_val=1.0, width=30):
     ratio = min(max(val / max_val if max_val else 0, 0.0), 1.0)
     filled = int(ratio * width)
     if ratio < 0.3:
@@ -102,3 +68,19 @@ def make_bar(val: float, max_val: float, width: int = 30) -> str:
     else:
         c = "red"
     return f"[{c}]{'█' * filled}{'░' * (width - filled)}[/{c}] {ratio * 100:5.1f}%"
+
+
+def waveform_bar(val, width=36):
+    mid = width // 2
+    pos = int((val + 1.0) / 2.0 * width)
+    pos = max(0, min(width - 1, pos))
+    chars = list("─" * width)
+    chars[mid] = "┼"
+    if pos < mid:
+        for i in range(pos, mid):
+            chars[i] = "█"
+    elif pos > mid:
+        for i in range(mid + 1, pos + 1):
+            chars[i] = "█"
+    chars[pos] = "◆"
+    return "".join(chars)
